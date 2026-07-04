@@ -62,6 +62,7 @@ export interface InteractionLog {
 export class DriftMonitor {
   private interactionLogs: InteractionLog[] = [];
   private defectHistory: { step: number; defects: DefectVector }[] = [];
+  private readonly maxDefectHistory = 1000;
 
   constructor(
     private storage: CrystalStorage,
@@ -101,6 +102,10 @@ export class DriftMonitor {
       step: step ?? this.interactionLogs.length,
       defects,
     });
+    // Bound telemetry history so long-running monitors do not leak memory.
+    if (this.defectHistory.length > this.maxDefectHistory) {
+      this.defectHistory = this.defectHistory.slice(-this.maxDefectHistory);
+    }
 
     return defects;
   }

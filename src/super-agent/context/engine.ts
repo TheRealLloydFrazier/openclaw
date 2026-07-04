@@ -38,6 +38,8 @@ export class IncrementalContextEngine {
   private turnsSinceCheckpoint: number = 0;
   private totalDeltaOps: number = 0;
   private snapshotHistory: ContextSnapshot[] = [];
+  private readonly maxSnapshotHistory = 500;
+  private turnCounter = 0; // monotonic; independent of trimmed history length
 
   constructor(
     private pipeline: RetrievalPipeline,
@@ -98,7 +100,7 @@ export class IncrementalContextEngine {
 
     const snapshot = this.createSnapshot(result);
     this.currentSnapshot = snapshot;
-    this.snapshotHistory.push(snapshot);
+    this.recordSnapshot(snapshot);
     this.turnsSinceCheckpoint = 0;
     this.totalDeltaOps = 0;
 
@@ -157,7 +159,7 @@ export class IncrementalContextEngine {
     // Apply delta to create new snapshot
     const snapshot = this.createSnapshot(result);
     this.currentSnapshot = snapshot;
-    this.snapshotHistory.push(snapshot);
+    this.recordSnapshot(snapshot);
     this.turnsSinceCheckpoint++;
     this.totalDeltaOps += added.length + removed.length + updated.length;
 
@@ -204,13 +206,21 @@ export class IncrementalContextEngine {
 
     return {
       snapshotId: `snap_${randomUUID()}`,
-      turnNumber: this.snapshotHistory.length + 1,
+      turnNumber: ++this.turnCounter,
       capsuleIds,
       capsuleVersions,
       tokenCount: estimateTokens(content),
       contentHash,
       createdAt: new Date().toISOString(),
     };
+  }
+
+  /** Append a snapshot to history and bound the history size (telemetry). */
+  private recordSnapshot(snapshot: ContextSnapshot): void {
+    this.snapshotHistory.push(snapshot);
+    if (this.snapshotHistory.length > this.maxSnapshotHistory) {
+      this.snapshotHistory = this.snapshotHistory.slice(-this.maxSnapshotHistory);
+    }
   }
 }
 

@@ -157,6 +157,18 @@ export class MultiLLMRouter {
     const models =
       modelIds ?? this.selectTopModels(analysis, Math.min(2, this.budget.maxConcurrentModels));
 
+    // Guard: with no registered models there is nothing to verify against.
+    // Degrade gracefully to a single routed call rather than returning empty.
+    if (models.length === 0) {
+      const output = await this.route(prompt, analysis);
+      return {
+        chosen: output,
+        chosenModelId: output.modelId,
+        allOutputs: new Map([[output.modelId, output]]),
+        scores: new Map([[output.modelId, scoreOutput(output)]]),
+      };
+    }
+
     // Execute in parallel
     const outputs = await Promise.all(
       models.map((id) =>
@@ -202,6 +214,20 @@ export class MultiLLMRouter {
     modelIds?: string[],
   ): Promise<SynthesizedOutput> {
     const models = modelIds ?? this.selectTopModels(analysis, this.budget.maxConcurrentModels);
+
+    // Guard: synthesis needs at least one model. With none registered, fall
+    // back to a single routed call wrapped as a synthesized result so callers
+    // always receive usable content instead of an empty string.
+    if (models.length === 0) {
+      const output = await this.route(prompt, analysis);
+      return {
+        content: output.content,
+        sourceModels: [output.modelId],
+        elementSources: new Map(),
+        confidence: 0.5,
+        synthesisTrace: JSON.stringify({ models: [output.modelId], fallback: "no_models" }),
+      };
+    }
 
     // Step 1: Parallel execution
     const outputs = await Promise.all(
@@ -491,11 +517,14 @@ function compareAcrossModels(elements: Map<string, ExtractedElements>): CrossMod
 }
 
 function normalizeForComparison(text: string): string {
+  // Normalize the FULL text. A previous version truncated to 200 chars, which
+  // made two long but distinct claims sharing a prefix collapse into one key —
+  // producing false "agreements" between models that actually disagreed.
   return text
     .toLowerCase()
     .replace(/[^\w\s]/g, "")
-    .trim()
-    .slice(0, 200);
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ─── Fusion ──────────────────────────────────────────────────────

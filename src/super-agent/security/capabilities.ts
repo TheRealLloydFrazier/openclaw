@@ -50,6 +50,18 @@ export class CapabilityEngine {
    * Grant a capability to an agent.
    */
   grant(capability: Omit<Capability, "id">): Capability {
+    // Security: wildcard grants ("*" resource or action) are all-access tokens.
+    // Only the system or governance may issue them; agents cannot self-escalate
+    // to universal access even if they hold a reference to the engine.
+    const usesWildcard = capability.resource === "*" || capability.actions.includes("*");
+    const privilegedGranter =
+      capability.grantedBy === "system" || capability.grantedBy === "governance";
+    if (usesWildcard && !privilegedGranter) {
+      throw new Error(
+        `Wildcard capability grants require a system or governance granter (got "${capability.grantedBy}")`,
+      );
+    }
+
     const cap: Capability = {
       ...capability,
       id: `cap_${randomUUID()}`,
@@ -89,37 +101,48 @@ export class CapabilityEngine {
   // ─── Permission Checking ───────────────────────────────────
 
   /**
-   * Check if an agent has permission to perform an action on a resource.
+   * Find capabilities granted to an agent that match a resource + action and
+   * are currently within their temporal bounds. When includeConditional is
+   * false, capabilities carrying conditions are excluded (they require context
+   * and must be authorized via checkWithConditions).
+   * Longest-lived matches are returned first so callers prefer durable grants.
    */
-  check(agentId: string, resource: string, action: string): PermissionResult {
+  private findMatching(
+    agentId: string,
+    resource: string,
+    action: string,
+    includeConditional: boolean,
+  ): Capability[] {
     const now = new Date();
 
-    // Find all capabilities for this agent that match
     const matching = Array.from(this.capabilities.values()).filter((cap) => {
-      // Must be granted to this agent
       if (cap.grantedTo !== agentId) return false;
-
-      // Must match resource
       if (cap.resource !== resource && cap.resource !== "*") return false;
-
-      // Must include the action
       if (!cap.actions.includes(action) && !cap.actions.includes("*")) return false;
-
-      // Must not be expired
       if (cap.expiresAt && new Date(cap.expiresAt) < now) return false;
-
-      // Check scope temporal bounds
       if (cap.scope.validAfter && now < new Date(cap.scope.validAfter)) return false;
       if (cap.scope.validBefore && now > new Date(cap.scope.validBefore)) return false;
-
-      // Check conditions
-      if (cap.conditions) {
-        // Conditions are checked by the caller with context
-        // Here we just verify the capability exists
-      }
-
+      if (!includeConditional && cap.conditions && cap.conditions.length > 0) return false;
       return true;
     });
+
+    // Prefer longest-lived capabilities (undated = never expires = most durable).
+    matching.sort((a, b) => {
+      const aExp = a.expiresAt ? new Date(a.expiresAt).getTime() : Infinity;
+      const bExp = b.expiresAt ? new Date(b.expiresAt).getTime() : Infinity;
+      return bExp - aExp;
+    });
+
+    return matching;
+  }
+
+  /**
+   * Check if an agent has permission to perform an action on a resource.
+   * Capabilities with conditions are NOT authorized here; use
+   * checkWithConditions() to supply the runtime context they require.
+   */
+  check(agentId: string, resource: string, action: string): PermissionResult {
+    const matching = this.findMatching(agentId, resource, action, false);
 
     if (matching.length === 0) {
       return {
@@ -145,33 +168,61 @@ export class CapabilityEngine {
     action: string,
     context: Record<string, string | number>,
   ): PermissionResult {
-    const baseResult = this.check(agentId, resource, action);
-    if (!baseResult.allowed) return baseResult;
+    // Include conditional capabilities here since we have context to evaluate.
+    const matching = this.findMatching(agentId, resource, action, true);
 
-    // Verify conditions on the matched capability
-    const cap = this.capabilities.get(baseResult.capabilityId!);
-    if (!cap?.conditions || cap.conditions.length === 0) return baseResult;
+    if (matching.length === 0) {
+      return {
+        allowed: false,
+        reason: `No capability grants ${action} on ${resource} to ${agentId}`,
+        capabilityId: undefined,
+      };
+    }
 
-    for (const condition of cap.conditions) {
-      const contextValue = context[condition.field];
-      if (contextValue === undefined) {
-        return {
-          allowed: false,
-          reason: `Missing context field: ${condition.field}`,
-          capabilityId: cap.id,
-        };
+    // Prefer an unconditioned capability if one is available.
+    const unconditioned = matching.find((c) => !c.conditions || c.conditions.length === 0);
+    if (unconditioned) {
+      return { allowed: true, reason: "Capability matched", capabilityId: unconditioned.id };
+    }
+
+    // Otherwise evaluate the conditions on each candidate; the first that
+    // satisfies all of its conditions authorizes the action.
+    let lastFailure: PermissionResult | undefined;
+    for (const cap of matching) {
+      let ok = true;
+      for (const condition of cap.conditions!) {
+        const contextValue = context[condition.field];
+        if (contextValue === undefined) {
+          lastFailure = {
+            allowed: false,
+            reason: `Missing context field: ${condition.field}`,
+            capabilityId: cap.id,
+          };
+          ok = false;
+          break;
+        }
+        if (!evaluateCondition(condition, contextValue)) {
+          lastFailure = {
+            allowed: false,
+            reason: `Condition failed: ${condition.field} ${condition.operator} ${condition.value}`,
+            capabilityId: cap.id,
+          };
+          ok = false;
+          break;
+        }
       }
-
-      if (!evaluateCondition(condition, contextValue)) {
-        return {
-          allowed: false,
-          reason: `Condition failed: ${condition.field} ${condition.operator} ${condition.value}`,
-          capabilityId: cap.id,
-        };
+      if (ok) {
+        return { allowed: true, reason: "Capability matched", capabilityId: cap.id };
       }
     }
 
-    return baseResult;
+    return (
+      lastFailure ?? {
+        allowed: false,
+        reason: `No capability grants ${action} on ${resource} to ${agentId}`,
+        capabilityId: undefined,
+      }
+    );
   }
 
   // ─── Delegation ────────────────────────────────────────────
@@ -295,6 +346,14 @@ export class CapabilityEngine {
     for (const [id, cap] of this.capabilities) {
       if (cap.expiresAt && new Date(cap.expiresAt) < now) {
         this.capabilities.delete(id);
+        // Invariant 4: all capability lifecycle events are audited, including
+        // automatic expiry cleanup — otherwise the audit trail has blind spots.
+        this.logAudit("capability_revoked", "system:cleanup", {
+          capabilityId: id,
+          resource: cap.resource,
+          grantedTo: cap.grantedTo,
+          reason: "expired",
+        });
         removed++;
       }
     }

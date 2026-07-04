@@ -30,12 +30,24 @@ export class CrystalStorage {
 
   getCapsule(id: string): Capsule | undefined {
     const capsule = this.capsules.get(id);
-    if (capsule) {
-      // Update access metadata (side-effect-free copy for caller)
-      capsule.accessedAt = new Date().toISOString();
-      capsule.accessCount++;
-    }
-    return capsule;
+    if (!capsule) return undefined;
+    // Record the access on the stored capsule...
+    capsule.accessedAt = new Date().toISOString();
+    capsule.accessCount++;
+    // ...but hand the caller a copy so external mutation cannot bypass the
+    // propose-validate-commit write path or corrupt stored state.
+    return { ...capsule, tags: [...capsule.tags] };
+  }
+
+  /**
+   * Read a capsule WITHOUT recording an access (no accessedAt/accessCount
+   * bump). Use this for maintenance/introspection reads (annealing, drift
+   * scans) so background sweeps do not inflate usage metrics.
+   */
+  peekCapsule(id: string): Capsule | undefined {
+    const capsule = this.capsules.get(id);
+    if (!capsule) return undefined;
+    return { ...capsule, tags: [...capsule.tags] };
   }
 
   getCapsules(ids: string[]): Capsule[] {
@@ -486,6 +498,13 @@ export class CrystalStorage {
         capsule.updatedAt = new Date().toISOString();
         count++;
       }
+    }
+    if (count > 0) {
+      // Keep the audit trail complete: even bulk maintenance writes are logged.
+      this.logAudit("capsule_updated", "system:reindex", {
+        reason: "bulk embedding update",
+        count,
+      });
     }
     return count;
   }

@@ -247,8 +247,8 @@ export class AnnealingEngine {
 
     for (const summary of summaries.slice(0, maxDocuments)) {
       checked++;
-      // Check if parent capsules still exist
-      const parentsMissing = summary.parentCapsuleIds.some((pid) => !this.storage.getCapsule(pid));
+      // Check if parent capsules still exist (peek: don't inflate access metrics)
+      const parentsMissing = summary.parentCapsuleIds.some((pid) => !this.storage.peekCapsule(pid));
       if (parentsMissing) {
         orphaned++;
         // Flag for review (don't auto-fix - Memory Statue v2 Rule 2)
@@ -331,7 +331,10 @@ export class AnnealingEngine {
         noProvenance++;
       }
       for (const entry of capsule.provenance) {
-        if (entry.sourceType === "capsule_derivation" && !this.storage.getCapsule(entry.sourceId)) {
+        if (
+          entry.sourceType === "capsule_derivation" &&
+          !this.storage.peekCapsule(entry.sourceId)
+        ) {
           brokenLinks++;
         }
       }

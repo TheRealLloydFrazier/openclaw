@@ -289,18 +289,18 @@ describe("CrystalStorage", () => {
   });
 
   it("expires stale capsules", () => {
+    // Create the capsule with an already-expired TTL through the write path.
+    // (getCapsule() returns a copy, so external mutation cannot — by design —
+    // change stored state; the TTL must be set at creation.)
     const proposal = makeWriteProposal();
-    const result = storage.processWriteProposal(proposal);
-    const capsule = storage.getCapsule(result.capsuleId!)!;
-
-    // Manually set TTL to the past
-    capsule.ttl = {
+    proposal.capsule.ttl = {
       expiresAt: new Date(Date.now() - 1000).toISOString(),
       onExpiry: "archive",
     };
+    const result = storage.processWriteProposal(proposal);
 
     const expired = storage.expireStaleCapsules();
-    expect(expired).toContain(capsule.id);
+    expect(expired).toContain(result.capsuleId);
   });
 });
 

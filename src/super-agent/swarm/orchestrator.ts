@@ -165,8 +165,15 @@ export class SwarmOrchestrator {
       created.push(task);
     }
 
-    // Step 2: Register dependencies BEFORE assignment
+    // Step 2: Register dependencies BEFORE assignment.
+    // Reject cyclic dependency graphs up front — a cycle would leave every task
+    // in the cycle permanently "blocked" with no way to make progress.
     if (dependencyEdges) {
+      if (hasCycle(created.length, dependencyEdges)) {
+        // Roll back the tasks we just created so the swarm state stays clean.
+        for (const t of created) this.tasks.delete(t.id);
+        throw new Error("Cyclic task dependencies detected; decomposition rejected");
+      }
       for (const edge of dependencyEdges) {
         const fromTask = created[edge.fromIndex];
         const toTask = created[edge.toIndex];
@@ -529,4 +536,43 @@ export interface SwarmStatus {
 function average(nums: number[]): number {
   if (nums.length === 0) return 0;
   return nums.reduce((a, b) => a + b, 0) / nums.length;
+}
+
+/**
+ * Detect a cycle in a dependency graph over `nodeCount` tasks given edges
+ * expressed as fromIndex -> toIndex. Uses DFS three-color marking.
+ */
+function hasCycle(
+  nodeCount: number,
+  edges: { fromIndex: number; toIndex: number }[],
+): boolean {
+  const adjacency: number[][] = Array.from({ length: nodeCount }, () => []);
+  for (const edge of edges) {
+    if (
+      edge.fromIndex >= 0 &&
+      edge.fromIndex < nodeCount &&
+      edge.toIndex >= 0 &&
+      edge.toIndex < nodeCount
+    ) {
+      adjacency[edge.fromIndex]!.push(edge.toIndex);
+    }
+  }
+
+  // 0 = unvisited, 1 = in-progress (on current DFS stack), 2 = done
+  const state = new Array<number>(nodeCount).fill(0);
+
+  const visit = (node: number): boolean => {
+    state[node] = 1;
+    for (const next of adjacency[node]!) {
+      if (state[next] === 1) return true; // back-edge => cycle
+      if (state[next] === 0 && visit(next)) return true;
+    }
+    state[node] = 2;
+    return false;
+  };
+
+  for (let i = 0; i < nodeCount; i++) {
+    if (state[i] === 0 && visit(i)) return true;
+  }
+  return false;
 }

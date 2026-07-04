@@ -85,9 +85,12 @@ export class TraceStore {
    */
   traceChain(eventId: string): TraceEvent[] {
     const chain: TraceEvent[] = [];
+    const visited = new Set<string>(); // guard against circular parent references
     let currentId: string | undefined = eventId;
 
     while (currentId) {
+      if (visited.has(currentId)) break; // cycle detected; stop to avoid infinite loop
+      visited.add(currentId);
       const event = this.getEvent(currentId);
       if (!event) break;
       chain.unshift(event); // prepend to maintain chronological order

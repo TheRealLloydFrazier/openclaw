@@ -14,6 +14,8 @@
 import type {
   AgentSpecialization,
   DefectVector,
+  EscalationRequest,
+  EscalationResponse,
   ModelProfile,
   RetrievalRequest,
   SwarmTask,
@@ -23,7 +25,7 @@ import type {
 } from "./types.js";
 import { TFRDCanon, type QualityGateResult } from "./canon/tfrd.js";
 import { IncrementalContextEngine, type IncrementalRetrievalResult } from "./context/engine.js";
-import { AnnealingEngine } from "./crystal/annealing.js";
+import { AnnealingEngine, type AnnealingResult } from "./crystal/annealing.js";
 import { DriftMonitor } from "./crystal/drift.js";
 import { RetrievalPipeline } from "./crystal/retrieval.js";
 import { CrystalStorage } from "./crystal/storage.js";
@@ -42,7 +44,7 @@ export interface SuperAgentConfig {
   models?: ModelProfile[];
 
   /** Escalation handler for capability requests */
-  escalationHandler?: (req: any) => any;
+  escalationHandler?: (req: EscalationRequest) => EscalationResponse;
 
   /** Maximum escalations per hour per agent */
   maxEscalationsPerHour?: number;
@@ -424,7 +426,7 @@ export class SuperAgentRuntime {
    */
   async runMaintenance(): Promise<{
     ran: boolean;
-    result?: any;
+    result?: AnnealingResult;
   }> {
     if (!this.annealing.shouldRun(this.step)) {
       return { ran: false };
@@ -499,7 +501,7 @@ function createNoOpAdapter(): ModelAdapter {
       return {
         modelId,
         content: `[No-op response from ${modelId}]`,
-        tokenCount: { input: prompt.length / 4, output: 10 },
+        tokenCount: { input: Math.ceil(prompt.length / 4), output: 10 },
         latencyMs: 0,
         finishReason: "stop",
       };
